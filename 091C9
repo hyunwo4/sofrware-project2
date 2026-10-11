@@ -1,0 +1,100 @@
+// Arduino pin assignment
+#define PIN_LED  9
+#define PIN_TRIG 12
+#define PIN_ECHO 13
+
+// configurable parameters
+#define SND_VEL 346.0     // 음속 (24도 기준, m/sec)
+#define INTERVAL 25       // 샘플링 주기 (msec)
+#define PULSE_DURATION 10 // 초음파 펄스 길이 (usec)
+#define _DIST_MIN 100     // 측정 최소 거리 (mm)
+#define _DIST_MAX 300     // 측정 최대 거리 (mm)
+
+#define TIMEOUT ((INTERVAL / 2) * 1000.0) // 에코 최대 대기시간 (usec)
+#define SCALE (0.001 * 0.5 * SND_VEL)     // 시간 -> 거리 변환 계수
+
+#define _EMA_ALPHA 0.5    // EMA에서 새 샘플의 가중치 (0~1)
+#define N 10              // 중위수 필터 샘플 수 (3, 10, 30으로 바꿔서 실험)
+
+// global variables
+unsigned long last_sampling_time = 0;
+float dist_ema = _DIST_MAX;   // EMA 거리값
+
+// 중위수 필터용 원형 버퍼
+float samples[N];             // 최근 N개 raw 샘플
+int sample_idx = 0;           // 다음 샘플을 저장할 위치
+int sample_cnt = 0;           // 버퍼 안의 유효 샘플 수 (최대 N)
+
+void setup() {
+  pinMode(PIN_LED, OUTPUT);
+  pinMode(PIN_TRIG, OUTPUT);
+  pinMode(PIN_ECHO, INPUT);
+  digitalWrite(PIN_TRIG, LOW);
+
+  Serial.begin(57600);
+}
+
+void loop() {
+  // 다음 샘플링 시각까지 대기
+  if (millis() - last_sampling_time < INTERVAL)
+    return;
+  last_sampling_time += INTERVAL;
+
+  // raw 측정 (timeout이면 0). 직전 유효값 대체 없음
+  float dist_raw = USS_measure(PIN_TRIG, PIN_ECHO);
+
+  // EMA 필터 (raw에 적용, 비교용)
+  dist_ema = _EMA_ALPHA * dist_raw + (1 - _EMA_ALPHA) * dist_ema;
+
+  // 중위수 필터 (raw에 적용)
+  float dist_median = median_filter(dist_raw);
+
+  // 시리얼 플로터 출력
+  Serial.print("Min:");     Serial.print(_DIST_MIN);
+  Serial.print(",raw:");    Serial.print(dist_raw);
+  Serial.print(",ema:");    Serial.print(dist_ema);
+  Serial.print(",median:"); Serial.print(dist_median);
+  Serial.print(",Max:");    Serial.print(_DIST_MAX);
+  Serial.println("");
+
+  // 필터 결과가 범위 밖이면 LED 제어 (기존 코드와 동일)
+  if (dist_median < _DIST_MIN || dist_median > _DIST_MAX)
+    digitalWrite(PIN_LED, HIGH);
+  else
+    digitalWrite(PIN_LED, LOW);
+}
+
+// 새 샘플을 버퍼에 저장하고 최근 N개의 중위수를 반환
+float median_filter(float new_sample) {
+  float sorted[N];
+
+  // 새 샘플 저장 (버퍼가 차 있으면 가장 오래된 값을 덮어씀)
+  samples[sample_idx] = new_sample;
+  sample_idx = (sample_idx + 1) % N;
+  if (sample_cnt < N) sample_cnt++;
+
+  // 삽입 정렬
+  for (int i = 0; i < sample_cnt; i++) {
+    float v = samples[i];
+    int j = i - 1;
+    while (j >= 0 && sorted[j] > v) {
+      sorted[j + 1] = sorted[j];
+      j--;
+    }
+    sorted[j + 1] = v;
+  }
+
+  // 홀수면 가운데 값, 짝수면 가운데 두 값의 평균
+  if (sample_cnt % 2 == 1)
+    return sorted[sample_cnt / 2];
+  return (sorted[sample_cnt / 2 - 1] + sorted[sample_cnt / 2]) / 2.0;
+}
+
+// 초음파 거리 측정 (단위: mm)
+float USS_measure(int TRIG, int ECHO) {
+  digitalWrite(TRIG, HIGH);
+  delayMicroseconds(PULSE_DURATION);
+  digitalWrite(TRIG, LOW);
+
+  return pulseIn(ECHO, HIGH, TIMEOUT) * SCALE;
+}
